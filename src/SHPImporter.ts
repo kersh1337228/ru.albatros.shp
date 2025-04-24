@@ -338,23 +338,30 @@ async function featureGeometry(editor: DwgEntityEditor, layer: DwgLayer, rawGeom
     }
 }
 
-async function loadFeature(editor: DwgEntityEditor, drawing: Drawing, feature: Feature, layerNames: string[], layerIDs: { next: number }, outputs: OutputChannel): Promise<DwgLayer> {
-    const layerData = featureProps(feature.properties, outputs);
-    layerData.$type = drawing.types.itemById('SmdxElement');
+function assignLayerName(layerData: DwgTypedObject, properties: Record<string, PropertyValue>, layerNames: string[], layerIDs: { next: number }): void {
     if (layerData.name === undefined) {
         for (let i = 0; i < layerNames.length; ++i) {
             const name = layerNames[i];
-            const layerName = feature.properties[name];
+            const layerName = properties[name];
             if (layerName !== undefined) {
                 switch (typeof layerName) {
                     case 'number':
+                        if (!isFinite(layerName)) {
+                            continue;
+                        }
                         layerData.name = layerName.toString();
                         break;
                     case 'string':
+                        if (layerName.length === 0) {
+                            continue;
+                        }
                         layerData.name = layerName;
                         break;
                     default:
                         if (layerName instanceof Date) {
+                            if (isNaN(layerName.valueOf())) {
+                                continue;
+                            }
                             layerData.name = layerName.toLocaleString();
                         }
                         break;
@@ -366,6 +373,12 @@ async function loadFeature(editor: DwgEntityEditor, drawing: Drawing, feature: F
             layerData.name = (++layerIDs.next).toString();
         }
     }
+}
+
+async function loadFeature(editor: DwgEntityEditor, drawing: Drawing, feature: Feature, layerNames: string[], layerIDs: { next: number }, outputs: OutputChannel): Promise<DwgLayer> {
+    const layerData = featureProps(feature.properties, outputs);
+    layerData.$type = drawing.types.itemById('SmdxElement');
+    assignLayerName(layerData, feature.properties, layerNames, layerIDs);
     const layer = await drawing.layers.add(layerData as unknown as DwgLayerData);
     layer.disabled = true;
     await featureGeometry(editor, layer, feature.geometry, outputs);
