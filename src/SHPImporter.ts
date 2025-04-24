@@ -1,4 +1,5 @@
 import shp from 'shpjs';
+import { QuickPickItemKind } from 'albatros/enums';
 
 interface ShapeGroup {
     shp: ArrayBuffer;
@@ -37,6 +38,7 @@ interface MultiPolygon {
 }
 type Geometry = Point | LineString | Polygon | MultiPoint | MultiLineString | MultiPolygon;
 
+type PropertyType = 'number' | 'string' | 'boolean' | 'Date';
 type PropertyValue = number | string | boolean | Date;
 
 interface Feature {
@@ -54,9 +56,10 @@ type GeoJSON = FeatureCollection; // TODO: add other types
 
 const ALLOWED_EXTENSIONS = ['shp', 'dbf', 'prj', 'cpg', 'idx', 'shx'];
 
-async function addToGroups(groups: Record<string, ShapeGroup>, item: WorkspaceItem) {
+async function addToGroups(groups: Record<string, ShapeGroup>, item: WorkspaceItem, outputs: OutputChannel, progress: WorkerProgress): Promise<void> {
     const bytes = await item.get();
     const title = item.title;
+    progress.details = title;
     const name = title.substring(0, title.length - 4);
     const extension = title.substring(title.length - 3) as keyof ShapeGroup;
     let group = groups[name];
@@ -65,29 +68,122 @@ async function addToGroups(groups: Record<string, ShapeGroup>, item: WorkspaceIt
         groups[name] = group;
     }
     if (!ALLOWED_EXTENSIONS.includes(extension)) {
-        console.error(`Unsupported extension ${extension}`);
+        outputs.error('Unsupported extension {0}', extension);
         return;
     }
     group[extension] = bytes.buffer;
 }
 
-async function extractGroups(groups: Record<string, ShapeGroup>, items: WorkspaceItem[]): Promise<void> {
+async function extractGroups(groups: Record<string, ShapeGroup>, items: WorkspaceItem[], outputs: OutputChannel, progress: WorkerProgress): Promise<void> {
     for (let i = 0; i < items.length; ++i) {
         const item = items[i];
         switch (item.mimeType) {
             case 'application/vnd.folder':
-                await extractGroups(groups, await item.propfind());
+                await extractGroups(groups, await item.propfind(), outputs, progress);
                 break;
             case 'application/octet-stream':
-                await addToGroups(groups, item);
+                await addToGroups(groups, item, outputs, progress);
                 break;
             default:
-                console.error(`Unsupported MIME type ${item.mimeType}`);
+                outputs.error('Unsupported MIME type {0}', item.mimeType);
         }
     }
 }
 
-function featurePropValue(prop: PropertyValue): DwgTypedObject {
+function addPropName(propNames: Record<string, Record<PropertyType, PropertyValue>>, propName: string, propValue: PropertyValue): void {
+    let type: PropertyType | undefined;
+    switch (typeof propValue) {
+        case 'number':
+            if (!isFinite(propValue)) {
+                return;
+            }
+            type = 'number';
+            break;
+        case 'string':
+            if (propValue.length === 0) {
+                return;
+            }
+            type = 'string';
+            propValue = `\"${propValue}\"`;
+            break;
+        default:
+            if (propValue instanceof Date) {
+                if (isNaN(propValue.valueOf())) {
+                    return;
+                }
+                type = 'Date';
+                propValue = propValue.toLocaleString();
+            }
+            break;
+    }
+    if (type === undefined) {
+        return;
+    }
+    let examples = propNames[propName];
+    if (examples !== undefined) {
+        propNames[propName][type] = propValue;
+    } else {
+        propNames[propName] = { [type]: propValue } as Record<PropertyType, PropertyValue>;
+    }
+}
+
+async function decodeGeoJSONs(geoJSONs: Record<string, GeoJSON>, propNames: Record<string, Record<PropertyType, PropertyValue>>, groups: Record<string, ShapeGroup>): Promise<void> {
+    for (const name in groups) {
+        const group = groups[name];
+        // @ts-expect-error | allowed argument type
+        const geojson = await shp(group) as GeoJSON;
+        geoJSONs[name] = geojson;
+        switch (geojson.type) {
+            case 'FeatureCollection': {
+                const features = geojson.features;
+                for (let i = 0; i < features.length; ++i) {
+                    const feature = features[i];
+                    switch (feature.type) {
+                        case 'Feature': {
+                            const props = feature.properties;
+                            for (const propName in props) {
+                                addPropName(propNames, propName, props[propName]);
+                            }
+                            break;
+                        }
+                        default:
+                            break;
+                    }
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+}
+
+async function choosePossibleLayerNameProps(context: Context, propNames: Record<string, Record<PropertyType, PropertyValue>>): Promise<string[]> {
+    const options = new Array<QuickPickItem>();
+    for (const propName in propNames) {
+        const examples = propNames[propName];
+        let typesString = '';
+        for (const propType in examples) {
+            typesString += `${propType}: ${examples[propType as PropertyType]}, `;
+        }
+        options.push({
+            label: propName,
+            kind: QuickPickItemKind.Default,
+            detail: `${context.tr('Примеры')}: ${typesString.substring(0, typesString.length - 2)}`,
+        });
+    }
+    const selected = await context.showQuickPick(options, {
+        title: context.tr('Выберите поля, которые могут использоваться в качестве имени слоя'),
+        canPickMany: true,
+    });
+    const selectedNames = new Array<string>(selected.length);
+    for (let i = 0; i < selected.length; ++i) {
+        selectedNames[i] = selected[i].label;
+    }
+    return selectedNames;
+}
+
+function featurePropValue(prop: PropertyValue, outputs: OutputChannel): DwgTypedObject {
     switch (typeof prop) {
         case 'number':
             return {
@@ -112,7 +208,7 @@ function featurePropValue(prop: PropertyValue): DwgTypedObject {
                     $type: 'string',
                 };
             } else {
-                console.error(`Unsupported property type ${prop}`);
+                outputs.error('Unsupported property type {0}', prop);
                 return {
                     $value: prop
                 }
@@ -120,10 +216,10 @@ function featurePropValue(prop: PropertyValue): DwgTypedObject {
     }
 }
 
-function featureProps(rawProps: Record<string, PropertyValue>): DwgTypedObject {
+function featureProps(rawProps: Record<string, PropertyValue>, outputs: OutputChannel): DwgTypedObject {
     const props = {} as DwgTypedObject;
     for (const name in rawProps) {
-        props[name] = featurePropValue(rawProps[name]);
+        props[name] = featurePropValue(rawProps[name], outputs);
     }
     return props;
 }
@@ -132,12 +228,15 @@ function coordinatesToVec3(coordinates: vec2 | vec3): vec3 {
     return coordinates.length >= 3 ? [coordinates[0], coordinates[1], coordinates[2]] as vec3 : [coordinates[0], coordinates[1], 0] as vec3;
 }
 
-const SCALE = 1;
+const SCALE = 10000; // TODO: use geodesic coordinates transform instead of scale
 function scaleCoordinates(coordinates: vec3): vec3 {
-    return coordinates.map(c => c * SCALE) as vec3;
+    for (let i = 0; i < coordinates.length; ++i) {
+        coordinates[i] *= SCALE;
+    }
+    return coordinates;
 }
 
-async function featureGeometry(editor: DwgEntityEditor, layer: DwgLayer, rawGeometry: Geometry) {
+async function featureGeometry(editor: DwgEntityEditor, layer: DwgLayer, rawGeometry: Geometry, outputs: OutputChannel): Promise<void> {
     switch (rawGeometry.type) {
         case 'Point': {
             // TODO: add point primitive
@@ -156,8 +255,12 @@ async function featureGeometry(editor: DwgEntityEditor, layer: DwgLayer, rawGeom
                     b: scaleCoordinates(coordinatesToVec3(rawGeometry.coordinates[1])),
                 });
             } else {
+                const coordinates = rawGeometry.coordinates;
+                for (let i = 0; i < coordinates.length; ++i) {
+                    coordinates[i] = scaleCoordinates(coordinatesToVec3(coordinates[i]));
+                }
                 entity = await editor.addPolyline3d({
-                    vertices: rawGeometry.coordinates.map(p => scaleCoordinates(coordinatesToVec3(p))),
+                    vertices: coordinates as vec3[],
                     flags: undefined,
                 });
             }
@@ -168,8 +271,11 @@ async function featureGeometry(editor: DwgEntityEditor, layer: DwgLayer, rawGeom
             // TODO: add as mesh (first vec3[] is polygon and the remaining ones are holes)
             for (let i = 0; i < rawGeometry.coordinates.length; ++i) {
                 const coordinates = rawGeometry.coordinates[i];
+                for (let i = 0; i < coordinates.length; ++i) {
+                    coordinates[i] = scaleCoordinates(coordinatesToVec3(coordinates[i]));
+                }
                 const entity = await editor.addPolyline3d({
-                    vertices: coordinates.map(p => scaleCoordinates(coordinatesToVec3(p))),
+                    vertices: coordinates as vec3[],
                     flags: undefined,
                 });
                 await entity.setx('$layer', layer);
@@ -197,8 +303,11 @@ async function featureGeometry(editor: DwgEntityEditor, layer: DwgLayer, rawGeom
                         b: scaleCoordinates(coordinatesToVec3(coordinates[1])),
                     });
                 } else {
+                    for (let i = 0; i < coordinates.length; ++i) {
+                        coordinates[i] = scaleCoordinates(coordinatesToVec3(coordinates[i]));
+                    }
                     entity = await editor.addPolyline3d({
-                        vertices: coordinates.map(p => scaleCoordinates(coordinatesToVec3(p))),
+                        vertices: coordinates as vec3[],
                         flags: undefined,
                     });
                 }
@@ -211,8 +320,11 @@ async function featureGeometry(editor: DwgEntityEditor, layer: DwgLayer, rawGeom
                 const polygonCoordinates = rawGeometry.coordinates[i];
                 for (let j = 0; j < polygonCoordinates.length; ++j) {
                     const coordinates = polygonCoordinates[j];
+                    for (let i = 0; i < coordinates.length; ++i) {
+                        coordinates[i] = scaleCoordinates(coordinatesToVec3(coordinates[i]));
+                    }
                     const entity = await editor.addPolyline3d({
-                        vertices: coordinates.map(p => scaleCoordinates(coordinatesToVec3(p))),
+                        vertices: coordinates as vec3[],
                         flags: undefined,
                     });
                     await entity.setx('$layer', layer);
@@ -221,25 +333,48 @@ async function featureGeometry(editor: DwgEntityEditor, layer: DwgLayer, rawGeom
             break;
         }
         default:
-            console.error(`Unsupported geometry type ${rawGeometry.type}`);
+            // @ts-expect-error | possible branch
+            outputs.error('Unsupported geometry type {0}', rawGeometry.type);
     }
 }
 
-async function loadFeature(editor: DwgEntityEditor, drawing: Drawing, feature: Feature): Promise<DwgLayer> {
-    const layerData = featureProps(feature.properties);
+async function loadFeature(editor: DwgEntityEditor, drawing: Drawing, feature: Feature, layerNames: string[], layerIDs: { next: number }, outputs: OutputChannel): Promise<DwgLayer> {
+    const layerData = featureProps(feature.properties, outputs);
     layerData.$type = drawing.types.itemById('SmdxElement');
-    layerData.name = '';
+    if (layerData.name === undefined) {
+        for (let i = 0; i < layerNames.length; ++i) {
+            const name = layerNames[i];
+            const layerName = feature.properties[name];
+            if (layerName !== undefined) {
+                switch (typeof layerName) {
+                    case 'number':
+                        layerData.name = layerName.toString();
+                        break;
+                    case 'string':
+                        layerData.name = layerName;
+                        break;
+                    default:
+                        if (layerName instanceof Date) {
+                            layerData.name = layerName.toLocaleString();
+                        }
+                        break;
+                }
+                break;
+            }
+        }
+        if (layerData.name === undefined) {
+            layerData.name = (++layerIDs.next).toString();
+        }
+    }
     const layer = await drawing.layers.add(layerData as unknown as DwgLayerData);
     layer.disabled = true;
-    await featureGeometry(editor, layer, feature.geometry);
+    await featureGeometry(editor, layer, feature.geometry, outputs);
     return layer;
 }
 
-async function loadShapes(editor: DwgEntityEditor, drawing: Drawing, groups: Record<string, ShapeGroup>) {
-    for (const name in groups) {
-        const group = groups[name];
-        // @ts-expect-error | allowed argument type
-        const geojson = await shp(group) as GeoJSON;
+async function loadShapes(editor: DwgEntityEditor, drawing: Drawing, geoJSONs: Record<string, GeoJSON>, layerNames: string[], layerIDs: { next: number }, outputs: OutputChannel): Promise<void> {
+    for (const name in geoJSONs) {
+        const geojson = geoJSONs[name];
         switch (geojson.type) {
             case 'FeatureCollection': {
                 const parent = await drawing.layers.add({
@@ -252,19 +387,19 @@ async function loadShapes(editor: DwgEntityEditor, drawing: Drawing, groups: Rec
                     const feature = features[i];
                     switch (feature.type) {
                         case 'Feature': {
-                            const layer = await loadFeature(editor, drawing, feature);
+                            const layer = await loadFeature(editor, drawing, feature, layerNames, layerIDs, outputs);
                             await layer.setx('$layer', parent);
                             break;
                         }
                         default:
-                            console.error(`Unsupported feature type ${feature.type}`);
+                            outputs.error('Unsupported feature type {0}', feature.type);
                             break;
                     }
                 }
                 break;
             }
             default:
-                console.error(`Unsupported GeoJSON type ${geojson.type}`);
+                outputs.error('Unsupported GeoJSON type {0}', geojson.type);
                 break;
         }
     }
@@ -276,9 +411,9 @@ export default class SHPImporter implements WorkspaceImporter {
     async import(workspace: Workspace, model: unknown): Promise<void> {
         const progress = this.context.beginProgress();
         const outputs = this.context.createOutputChannel('SHP');
-        try { // TODO: use outputs instead of console.error
+        try {
             outputs.info(this.context.tr('Импорт shape из {0}', workspace.origin ?? workspace.root.title));
-            progress.indeterminate = true; // TODO: individual shapes progress
+            progress.indeterminate = true;
             const drawing = model as Drawing;
             const layout = drawing.layouts?.model;
             if (layout === undefined) {
@@ -287,11 +422,16 @@ export default class SHPImporter implements WorkspaceImporter {
             progress.details = this.context.tr('Чтение файла');
             const items = await workspace.root.propfind();
             const groups = {} as Record<string, ShapeGroup>;
-            await extractGroups(groups, items);
+            await extractGroups(groups, items, outputs, progress);
+            const geoJSONs = {} as Record<string, GeoJSON>;
+            const propNames = {} as Record<string, Record<PropertyType, PropertyValue>>;
+            await decodeGeoJSONs(geoJSONs, propNames, groups);
+            const layerNames = await choosePossibleLayerNameProps(this.context, propNames);
+            const layerIDs = { next: 0 };
             const editor = layout.editor();
             await editor.beginEdit();
             try {
-                await loadShapes(editor, drawing, groups);
+                await loadShapes(editor, drawing, geoJSONs, layerNames, layerIDs, outputs);
             } finally {
                 await editor.endEdit();
             }
