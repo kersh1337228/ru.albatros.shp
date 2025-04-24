@@ -1,0 +1,41 @@
+{
+  "$schema": "node_modules/albatros/schema.json",
+  "name": "ru.albatros.shp",
+  "displayName": "SHP",
+  "description": "Загрузка .shp, .dbf, .prj, .cpg, .idx, .shx",
+  "private": true,
+  "version": "0.0.1",
+  "main": "main.ts",
+  "author": {
+    "name": "ООО НПФ \"Топоматик\"",
+    "email": "support@topomatic.ru",
+    "url": "https://topomatic.ru"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mzaitsev-code/albatros-example.git"
+  },
+  "icon": "favicon",
+  "apx": false,
+  "scripts": {
+    "serve": "albatros-cli serve",
+    "build": "albatros-cli build"
+  },
+  "devDependencies": {
+    "@types/shpjs": "^3.4.7",
+    "albatros": "*"
+  },
+  "dependencies": {
+    "shpjs": "^6.1.0"
+  },
+  "albatros": {
+    "importers": [
+      {
+        "target": "wdx",
+        "description": "SHP",
+        "cmd": "shp:importer",
+        "filenamePattern": ".shape/"
+      }
+    ]
+  }
+}
