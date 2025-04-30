@@ -332,9 +332,9 @@ async function featureGeometry(editor: DwgEntityEditor, layer: DwgLayer, rawGeom
             }
             break;
         }
-        default:
-            // @ts-expect-error | possible branch
+        default: // @ts-expect-error | possible branch
             outputs.error('Unsupported geometry type {0}', rawGeometry.type);
+            break;
     }
 }
 
@@ -385,19 +385,27 @@ async function loadFeature(editor: DwgEntityEditor, drawing: Drawing, feature: F
     return layer;
 }
 
-async function loadShapes(editor: DwgEntityEditor, drawing: Drawing, geoJSONs: Record<string, GeoJSON>, layerNames: string[], layerIDs: { next: number }, outputs: OutputChannel): Promise<void> {
-    for (const name in geoJSONs) {
+async function loadShapes(editor: DwgEntityEditor, drawing: Drawing, geoJSONs: Record<string, GeoJSON>, root: DwgLayer, layerNames: string[], layerIDs: { next: number }, outputs: OutputChannel, progress: WorkerProgress): Promise<void> {
+    progress.indeterminate = false;
+    const names = Object.keys(geoJSONs);
+    for (let i = 0; i < names.length; ++i) {
+        const name = names[i];
         const geojson = geoJSONs[name];
         switch (geojson.type) {
             case 'FeatureCollection': {
+                const percents = i * 100 / names.length;
+                progress.label = `${Math.round(percents)}%`;
+                progress.percents = percents;
+                progress.details = name;
                 const parent = await drawing.layers.add({
                     $type: drawing.types.itemById('SmdxElement'),
                     name,
                 } as unknown as DwgLayerData);
                 parent.disabled = true;
+                await parent.setx('$layer', root);
                 const features = geojson.features;
-                for (let i = 0; i < features.length; ++i) {
-                    const feature = features[i];
+                for (let j = 0; j < features.length; ++j) {
+                    const feature = features[j];
                     switch (feature.type) {
                         case 'Feature': {
                             const layer = await loadFeature(editor, drawing, feature, layerNames, layerIDs, outputs);
@@ -425,7 +433,8 @@ export default class SHPImporter implements WorkspaceImporter {
         const progress = this.context.beginProgress();
         const outputs = this.context.createOutputChannel('SHP');
         try {
-            outputs.info(this.context.tr('Импорт shape из {0}', workspace.origin ?? workspace.root.title));
+            const filename = workspace.origin ?? workspace.root.title;
+            outputs.info(this.context.tr('Импорт shape из {0}', filename));
             progress.indeterminate = true;
             const drawing = model as Drawing;
             const layout = drawing.layouts?.model;
@@ -441,11 +450,18 @@ export default class SHPImporter implements WorkspaceImporter {
             await decodeGeoJSONs(geoJSONs, propNames, groups);
             const layerNames = await choosePossibleLayerNameProps(this.context, propNames);
             const layerIDs = { next: 0 };
+            await drawing.layers.beginUpdate();
             const editor = layout.editor();
             await editor.beginEdit();
             try {
-                await loadShapes(editor, drawing, geoJSONs, layerNames, layerIDs, outputs);
+                const root = await drawing.layers.add({
+                    $type: drawing.types.itemById('SmdxElement'),
+                    name: filename,
+                } as unknown as DwgLayerData);
+                root.disabled = true;
+                await loadShapes(editor, drawing, geoJSONs, root, layerNames, layerIDs, outputs, progress);
             } finally {
+                await drawing.layers.endUpdate();
                 await editor.endEdit();
             }
         } catch (uncaughtException) {
