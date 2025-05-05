@@ -4,10 +4,14 @@ import { QuickPickItemKind } from 'albatros/enums';
 interface ShapeGroup {
     shp: ArrayBuffer;
     dbf?: ArrayBuffer;
+    shx?: ArrayBuffer;
+    sbn?: ArrayBuffer;
+    sbx?: ArrayBuffer;
+    aih?: ArrayBuffer;
+    ain?: ArrayBuffer;
     prj?: ArrayBuffer;
     cpg?: ArrayBuffer;
     idx?: ArrayBuffer;
-    shx?: ArrayBuffer;
 }
 
 interface Point  {
@@ -54,7 +58,20 @@ interface FeatureCollection {
 
 type GeoJSON = FeatureCollection; // TODO: add other types
 
-const ALLOWED_EXTENSIONS = ['shp', 'dbf', 'prj', 'cpg', 'idx', 'shx'];
+interface ShapeGroup {
+    shp: ArrayBuffer;
+    dbf?: ArrayBuffer;
+    shx?: ArrayBuffer;
+    sbn?: ArrayBuffer;
+    sbx?: ArrayBuffer;
+    aih?: ArrayBuffer;
+    ain?: ArrayBuffer;
+    prj?: ArrayBuffer;
+    cpg?: ArrayBuffer;
+    idx?: ArrayBuffer;
+}
+
+const ALLOWED_EXTENSIONS = new Set(['shp', 'dbf', 'shx', 'sbn', 'sbx', 'aih', 'ain', 'prj', 'cpg', 'idx']);
 
 async function addToGroups(groups: Record<string, ShapeGroup>, item: WorkspaceItem, outputs: OutputChannel, progress: WorkerProgress): Promise<void> {
     const bytes = await item.get();
@@ -62,14 +79,14 @@ async function addToGroups(groups: Record<string, ShapeGroup>, item: WorkspaceIt
     progress.details = title;
     const name = title.substring(0, title.length - 4);
     const extension = title.substring(title.length - 3) as keyof ShapeGroup;
+    if (!ALLOWED_EXTENSIONS.has(extension)) {
+        outputs.error('Unsupported extension {0}', extension);
+        return;
+    }
     let group = groups[name];
     if (group === undefined) {
         group = {} as ShapeGroup;
         groups[name] = group;
-    }
-    if (!ALLOWED_EXTENSIONS.includes(extension)) {
-        outputs.error('Unsupported extension {0}', extension);
-        return;
     }
     group[extension] = bytes.buffer;
 }
