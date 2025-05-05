@@ -28,7 +28,6 @@ jobs:
           mkdir site
           cp ./README.md ./site/README.md
           cp ./_config.yml ./site/_config.yml
-          cp -r ./docs ./site/docs
       - name: Build with Jekyll
         uses: actions/jekyll-build-pages@v1
         with:
