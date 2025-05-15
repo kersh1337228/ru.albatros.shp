@@ -245,7 +245,7 @@ function coordinatesToVec3(coordinates: vec2 | vec3): vec3 {
     return coordinates.length >= 3 ? [coordinates[0], coordinates[1], coordinates[2]] as vec3 : [coordinates[0], coordinates[1], 0] as vec3;
 }
 
-const SCALE = 10000; // TODO: use geodesic coordinates transform instead of scale
+const SCALE = 1; // TODO: use geodesic coordinates transform instead of scale
 function scaleCoordinates(coordinates: vec3): vec3 {
     for (let i = 0; i < coordinates.length; ++i) {
         coordinates[i] *= SCALE;
